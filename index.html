@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <title>Movie Map Browser</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -116,18 +117,29 @@ function layout() {
   });
   const keys = Object.keys(groups);
   const cols = Math.ceil(Math.sqrt(keys.length));
-  const spacing = 220;
+  const spacing = 260;
   keys.forEach((k, i) => {
     const col = i % cols, row = Math.floor(i / cols);
-    const cx = 120 + col * spacing, cy = 100 + row * spacing;
+    const cx = 150 + col * spacing, cy = 120 + row * spacing;
     const items = groups[k];
-    items.forEach((m, j) => {
-      const ang = (j / items.length) * 2 * Math.PI;
-      const r = 18 + Math.min(items.length, 10) * 4;
-      m._x = cx + (items.length > 1 ? r * Math.cos(ang) : 0);
-      m._y = cy + (items.length > 1 ? r * Math.sin(ang) : 0);
+    items.forEach((m) => {
+      const title = getTitle(m);
+      m._r = 22 + Math.min(title.length, 18) * 2.1;
+      m.x = cx + (Math.random() - 0.5) * 10;
+      m.y = cy + (Math.random() - 0.5) * 10;
       m._cx = cx; m._cy = cy; m._key = k; m._n = items.length;
     });
+    // Force simulation: items repel each other based on label size
+    // (collide) and are pulled gently toward their cluster's center (x/y),
+    // so a crowded cluster naturally spreads wider instead of overlapping
+    // on a fixed-size ring.
+    const sim = d3.forceSimulation(items)
+      .force("collide", d3.forceCollide((d) => d._r).strength(0.9))
+      .force("x", d3.forceX(cx).strength(0.06))
+      .force("y", d3.forceY(cy).strength(0.06))
+      .stop();
+    for (let t = 0; t < 250; t++) sim.tick();
+    items.forEach((m) => { m._x = m.x; m._y = m.y; });
   });
 }
 
