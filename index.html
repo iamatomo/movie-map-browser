@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>Movie Map Browser</title>
+<title>My Movie Universe</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -346,6 +346,7 @@ const MIN_SCALE = 0.5, MAX_SCALE = 4;
 let tx = 0, ty = 0, scale = MIN_SCALE; // start fully zoomed out
 let currentT = 0;
 let clusterMeta = {};
+let contentMinX = 0, contentMaxX = 680, contentMinY = 0, contentMaxY = 420;
 let interactionBoost = 0; // rises on pan/zoom, decays back toward 0 when idle
 let ready = false;
 function getTitle(m) {
@@ -375,6 +376,8 @@ function keyFor(m, field) {
 
 function layout() {
   clusterMeta = {};
+  contentMinX = Infinity; contentMaxX = -Infinity;
+  contentMinY = Infinity; contentMaxY = -Infinity;
   const groups = {};
   movies.forEach((m) => {
     const k = keyFor(m, curCat);
@@ -407,6 +410,11 @@ function layout() {
       phaseY: Math.random() * Math.PI * 2,
       speed: 0.18 + Math.random() * 0.12,
     };
+    const r = 22 + items.length * 2.5;
+    contentMinX = Math.min(contentMinX, cx - r);
+    contentMaxX = Math.max(contentMaxX, cx + r);
+    contentMinY = Math.min(contentMinY, cy - r);
+    contentMaxY = Math.max(contentMaxY, cy + r);
   });
 
   // One simulation across every movie, not one per cluster. Collision
@@ -518,6 +526,19 @@ function render(now) {
   if (!ready) return;
   now = now || performance.now();
   const timeSec = now / 1000;
+
+  // Keep at least a bit of the content on screen at all times: clamp
+  // tx/ty so the content's bounding box can't be panned entirely out of
+  // the viewport. Runs every frame, so it self-corrects regardless of
+  // whether the pan came from a drag, a pinch, or the zoom buttons.
+  const OVERLAP = 150; // viewBox units of content guaranteed visible
+  const minTx = OVERLAP - contentMaxX * scale;
+  const maxTx = (680 - OVERLAP) - contentMinX * scale;
+  tx = minTx <= maxTx ? Math.min(maxTx, Math.max(minTx, tx)) : (minTx + maxTx) / 2;
+  const minTy = OVERLAP - contentMaxY * scale;
+  const maxTy = (420 - OVERLAP) - contentMinY * scale;
+  ty = minTy <= maxTy ? Math.min(maxTy, Math.max(minTy, ty)) : (minTy + maxTy) / 2;
+
   const g = document.getElementById("g");
   g.setAttribute("transform", `translate(${tx},${ty}) scale(${scale})`);
   // t = 0 fully clustered, t = 1 fully declustered into individual titles
