@@ -268,6 +268,9 @@ let categoryFields = [];
 let curCat = null;
 let tx = 0, ty = 0, scale = 1;
 let currentT = 0;
+let clusterMeta = {};
+let interactionBoost = 0; // rises on pan/zoom, decays back toward 0 when idle
+let ready = false;
 function getTitle(m) {
   for (const f of TITLE_FIELD_CANDIDATES) if (m[f]) return m[f];
   return "untitled";
@@ -294,6 +297,7 @@ function keyFor(m, field) {
 }
 
 function layout() {
+  clusterMeta = {};
   const groups = {};
   movies.forEach((m) => {
     const k = keyFor(m, curCat);
@@ -312,7 +316,20 @@ function layout() {
       m.x = cx + (Math.random() - 0.5) * 10;
       m.y = cy + (Math.random() - 0.5) * 10;
       m._cx = cx; m._cy = cy; m._key = k; m._n = items.length;
+      // Each title gets its own small, slow, unique wobble so the
+      // collection doesn't all breathe in lockstep.
+      m._phaseX = Math.random() * Math.PI * 2;
+      m._phaseY = Math.random() * Math.PI * 2;
+      m._speed = 0.25 + Math.random() * 0.25;
     });
+    // The cluster circle itself also gets a slow drift, distinct from
+    // its titles', so the "planet" reads as its own body in motion.
+    clusterMeta[k] = {
+      cx, cy, n: items.length,
+      phaseX: Math.random() * Math.PI * 2,
+      phaseY: Math.random() * Math.PI * 2,
+      speed: 0.18 + Math.random() * 0.12,
+    };
   });
 
   // One simulation across every movie, not one per cluster. Collision
@@ -333,51 +350,122 @@ function layout() {
 const DECLUSTER_START = 1.3;
 const DECLUSTER_END = 1.9;
 
-function render() {
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// Builds the actual SVG elements once and keeps references to them, so
+// each animation frame only updates attributes (cheap) instead of
+// rebuilding the whole scene as a string (expensive at 60fps).
+function buildDom() {
+  const g = document.getElementById("g");
+  g.innerHTML = "";
+  Object.entries(clusterMeta).forEach(([key, c]) => {
+    const circle = document.createElementNS(SVG_NS, "circle");
+    circle.setAttribute("class", "cluster-circle");
+    circle.style.cursor = "pointer";
+    circle.addEventListener("click", (e) => clusterCircleClicked(e, key));
+    const text = document.createElementNS(SVG_NS, "text");
+    text.textContent = `${key} (${c.n})`;
+    g.appendChild(circle);
+    g.appendChild(text);
+    c.circleEl = circle; c.textEl = text;
+  });
+  movies.forEach((m) => {
+    const dot = document.createElementNS(SVG_NS, "circle");
+    dot.setAttribute("class", "movie-dot");
+    dot.style.cursor = "pointer";
+    dot.addEventListener("click", (e) => { e.stopPropagation(); showDetail(m.id); });
+    const text = document.createElementNS(SVG_NS, "text");
+    text.textContent = getTitle(m);
+    g.appendChild(dot);
+    g.appendChild(text);
+    m._dotEl = dot; m._textEl = text;
+  });
+}
+
+// A small, slow, per-body sine wander. `boost` amplifies it temporarily
+// during and just after active panning/zooming, then settles back to
+// a gentle idle amplitude, which is what gives the "moves while
+// interacting, resolves to steadier when you stop" feel.
+function computeDrift(phaseX, phaseY, speed, amplitude, timeSec, boost) {
+  const amp = amplitude * (1 + boost * 2.5);
+  return [
+    Math.sin(timeSec * speed + phaseX) * amp,
+    Math.cos(timeSec * speed * 0.85 + phaseY) * amp,
+  ];
+}
+
+function render(now) {
+  if (!ready) return;
+  now = now || performance.now();
+  const timeSec = now / 1000;
   const g = document.getElementById("g");
   g.setAttribute("transform", `translate(${tx},${ty}) scale(${scale})`);
   // t = 0 fully clustered, t = 1 fully declustered into individual titles
   const t = Math.max(0, Math.min(1,
     (scale - DECLUSTER_START) / (DECLUSTER_END - DECLUSTER_START)));
   currentT = t;
-  let svg = "";
-  const seen = {};
 
-  // Cluster circles are always drawn as the background layer, so the
-  // genre grouping stays visible even once you're looking at titles.
-  // They only dim slightly (down to 75% opacity), never vanish, so
-  // there's a clear boundary showing which cluster you're inside.
-  // Clicking the circle itself resolves to whichever title is nearest
-  // the click, so you don't have to land precisely on a small dot.
-  movies.forEach((m) => {
-    if (seen[m._key]) return; seen[m._key] = true;
-    const r = 22 + m._n * 2.5;
+  // Cluster circles: always visible (background layer, dims to 75%
+  // opacity once declustered rather than disappearing) and drifting
+  // gently on their own, independent of their titles.
+  Object.values(clusterMeta).forEach((c) => {
+    const [dx, dy] = computeDrift(c.phaseX, c.phaseY, c.speed, 3, timeSec, interactionBoost);
+    const cx = c.cx + dx, cy = c.cy + dy;
+    c._renderCx = cx; c._renderCy = cy;
+    const r = 22 + c.n * 2.5;
     const circleOpacity = 1 - t * 0.25;
-    const labelOpacity = 1 - t; // count label fades out once titles take over
-    svg += `<circle cx="${m._cx}" cy="${m._cy}" r="${r}" class="cluster-circle" style="opacity:${circleOpacity};cursor:pointer" onclick="clusterCircleClicked(event, '${m._key}')"/>`;
-    if (labelOpacity > 0.03) {
-      svg += `<text x="${m._cx}" y="${m._cy + 4}" style="opacity:${labelOpacity}">${m._key} (${m._n})</text>`;
-    }
+    const labelOpacity = 1 - t;
+    c.circleEl.setAttribute("cx", cx);
+    c.circleEl.setAttribute("cy", cy);
+    c.circleEl.setAttribute("r", r);
+    c.circleEl.style.opacity = circleOpacity;
+    c.textEl.setAttribute("x", cx);
+    c.textEl.setAttribute("y", cy + 4);
+    c.textEl.style.opacity = labelOpacity > 0.03 ? labelOpacity : 0;
   });
 
-  // Individual titles emerge from their cluster's center point and
-  // travel outward to their settled (force-simulated) position as t
-  // increases, fading in along the way rather than popping in place.
-  if (t > 0.003) {
-    movies.forEach((m) => {
-      const ex = m._cx + t * (m._x - m._cx);
-      const ey = m._cy + t * (m._y - m._cy);
-      m._renderX = ex; m._renderY = ey; // used for nearest-title click lookup
-      const r = 4 + 10 * t;
-      const titleOpacity = Math.max(0, (t - 0.5) * 2);
-      svg += `<circle cx="${ex}" cy="${ey}" r="${r}" class="movie-dot" style="opacity:${t};cursor:pointer" onclick="event.stopPropagation(); showDetail('${m.id}')"/>`;
-      if (titleOpacity > 0.03) {
-        svg += `<text x="${ex}" y="${ey + 22}" style="opacity:${titleOpacity}">${getTitle(m)}</text>`;
-      }
-    });
-  }
-  g.innerHTML = svg;
+  // Individual titles emerge from their cluster's center and travel
+  // outward to their settled (force-simulated) position as t increases.
+  // While still clustered they drift together with their parent circle;
+  // as they emerge they blend into their own independent small wander,
+  // kept intentionally smaller than a title's own radius so this rarely
+  // introduces new overlap on top of the settled layout.
+  movies.forEach((m) => {
+    const c = clusterMeta[m._key];
+    const ownAmplitude = Math.min(3, m._r * 0.18);
+    const [ownDx, ownDy] = computeDrift(m._phaseX, m._phaseY, m._speed, ownAmplitude, timeSec, interactionBoost);
+    const driftX = (c._renderCx - c.cx) * (1 - t) + ownDx * t;
+    const driftY = (c._renderCy - c.cy) * (1 - t) + ownDy * t;
+    const ex = m._cx + t * (m._x - m._cx) + driftX;
+    const ey = m._cy + t * (m._y - m._cy) + driftY;
+    m._renderX = ex; m._renderY = ey; // used for nearest-title click lookup
+    const r = 4 + 10 * t;
+    const titleOpacity = Math.max(0, (t - 0.5) * 2);
+    m._dotEl.setAttribute("cx", ex);
+    m._dotEl.setAttribute("cy", ey);
+    m._dotEl.setAttribute("r", r);
+    m._dotEl.style.opacity = t;
+    m._textEl.setAttribute("x", ex);
+    m._textEl.setAttribute("y", ey + 22);
+    m._textEl.style.opacity = titleOpacity > 0.03 ? titleOpacity : 0;
+  });
 }
+
+// Runs continuously so the idle drift keeps animating even when nothing
+// is being dragged or scrolled, and so interactionBoost has something
+// decaying it back down every frame after an interaction ends.
+let lastFrameTime = null;
+function frameLoop(now) {
+  if (lastFrameTime !== null) {
+    const dt = now - lastFrameTime;
+    interactionBoost *= Math.exp(-dt / 220);
+    if (interactionBoost < 0.001) interactionBoost = 0;
+  }
+  lastFrameTime = now;
+  render(now);
+  requestAnimationFrame(frameLoop);
+}
+requestAnimationFrame(frameLoop);
 
 function showDetail(id) {
   const m = movies.find((x) => x.id === id);
@@ -448,7 +536,9 @@ window.addEventListener("mouseup", () => { dragging = false; stage.style.cursor 
 window.addEventListener("mousemove", (e) => {
   if (!dragging) return;
   tx += e.clientX - lastX; ty += e.clientY - lastY;
-  lastX = e.clientX; lastY = e.clientY; render();
+  lastX = e.clientX; lastY = e.clientY;
+  interactionBoost = 1;
+  render();
 });
 stage.addEventListener("wheel", (e) => {
   e.preventDefault();
@@ -463,6 +553,7 @@ stage.addEventListener("wheel", (e) => {
   tx = p.x - worldX * newScale;
   ty = p.y - worldY * newScale;
   scale = newScale;
+  interactionBoost = 1;
   render();
 }, { passive: false });
 let touchStartDist = null, touchStartScale = 1, touchAnchor = null;
@@ -490,10 +581,13 @@ stage.addEventListener("touchmove", (e) => {
     tx = touchAnchor.x - touchAnchor.worldX * newScale;
     ty = touchAnchor.y - touchAnchor.worldY * newScale;
     scale = newScale;
+    interactionBoost = 1;
     render();
   } else if (e.touches.length === 1 && dragging) {
     tx += e.touches[0].clientX - lastX; ty += e.touches[0].clientY - lastY;
-    lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; render();
+    lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    interactionBoost = 1;
+    render();
   }
 }, { passive: false });
 window.addEventListener("touchend", () => { dragging = false; touchStartDist = null; touchAnchor = null; });
@@ -649,7 +743,9 @@ fetch("/api/movies")
     categoryFields = detectCategoryFields(movies);
     // Always cluster by genre, no switching.
     curCat = GENRE_FIELD_CANDIDATES.find((f) => categoryFields.includes(f)) || categoryFields[0];
-    layout(); render();
+    layout();
+    buildDom();
+    ready = true;
   })
   .catch((err) => {
     document.getElementById("status").textContent = "Couldn't load collection: " + err.message;
