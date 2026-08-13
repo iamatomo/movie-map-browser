@@ -117,10 +117,10 @@ function layout() {
   });
   const keys = Object.keys(groups);
   const cols = Math.ceil(Math.sqrt(keys.length));
-  const spacing = 260;
+  const spacing = 320;
   keys.forEach((k, i) => {
     const col = i % cols, row = Math.floor(i / cols);
-    const cx = 150 + col * spacing, cy = 120 + row * spacing;
+    const cx = 180 + col * spacing, cy = 150 + row * spacing;
     const items = groups[k];
     items.forEach((m) => {
       const title = getTitle(m);
@@ -129,18 +129,19 @@ function layout() {
       m.y = cy + (Math.random() - 0.5) * 10;
       m._cx = cx; m._cy = cy; m._key = k; m._n = items.length;
     });
-    // Force simulation: items repel each other based on label size
-    // (collide) and are pulled gently toward their cluster's center (x/y),
-    // so a crowded cluster naturally spreads wider instead of overlapping
-    // on a fixed-size ring.
-    const sim = d3.forceSimulation(items)
-      .force("collide", d3.forceCollide((d) => d._r).strength(0.9))
-      .force("x", d3.forceX(cx).strength(0.06))
-      .force("y", d3.forceY(cy).strength(0.06))
-      .stop();
-    for (let t = 0; t < 250; t++) sim.tick();
-    items.forEach((m) => { m._x = m.x; m._y = m.y; });
   });
+
+  // One simulation across every movie, not one per cluster. Collision
+  // is checked globally so a crowded cluster pushes its neighbors away
+  // instead of just overlapping them, while the gentle x/y pull keeps
+  // each item drifting back toward its own cluster's center.
+  const sim = d3.forceSimulation(movies)
+    .force("collide", d3.forceCollide((d) => d._r).strength(0.9).iterations(2))
+    .force("x", d3.forceX((d) => d._cx).strength(0.08))
+    .force("y", d3.forceY((d) => d._cy).strength(0.08))
+    .stop();
+  for (let t = 0; t < 300; t++) sim.tick();
+  movies.forEach((m) => { m._x = m.x; m._y = m.y; });
 }
 
 function render() {
