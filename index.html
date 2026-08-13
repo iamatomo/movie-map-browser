@@ -120,14 +120,119 @@
     font-size: 14px;
     line-height: 1.6;
   }
+
+  /* Draft takeover */
+  #draft-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 60;
+    padding: 20px;
+  }
+  #draft-card {
+    position: relative;
+    background: #1c1f26;
+    border: 1px solid #2c303a;
+    border-radius: 16px;
+    padding: 32px 32px 28px;
+    max-width: 780px;
+    width: 100%;
+    max-height: 88vh;
+    overflow-y: auto;
+    font-family: 'Space Mono', monospace;
+  }
+  #draft-close {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    background: none;
+    border: none;
+    color: #8a8f99;
+    font-size: 20px;
+    font-family: 'Space Mono', monospace;
+    cursor: pointer;
+    padding: 0;
+  }
+  #draft-sentence {
+    font-size: 19px;
+    line-height: 1.6;
+    margin: 0 40px 22px 0;
+  }
+  #draft-sentence .filled { color: #e07856; font-weight: 700; }
+  #draft-sentence .empty { color: #565b66; }
+  .genre-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 26px;
+  }
+  .genre-chip {
+    background: #14161c;
+    border: 1px solid #2c303a;
+    color: #e8e8ec;
+  }
+  .genre-chip.selected {
+    border-color: #e07856;
+    color: #e07856;
+    background: rgba(224,120,86,0.1);
+  }
+  .draft-hint {
+    font-size: 12px;
+    color: #8a8f99;
+    margin: -14px 0 22px;
+  }
+  .draft-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .draft-tile {
+    background: #14161c;
+    border: 1px solid #2c303a;
+    border-radius: 12px;
+    padding: 16px 16px 18px;
+    cursor: pointer;
+  }
+  .draft-tile.selected { border-color: #e07856; box-shadow: 0 0 0 1px #e07856; }
+  .draft-tile h3 {
+    font-family: 'Space Mono', monospace;
+    font-size: 15px;
+    font-weight: 700;
+    margin: 0 0 10px;
+    line-height: 1.3;
+  }
+  .draft-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+  #watch-btn {
+    border-color: #e07856;
+    color: #e07856;
+  }
+  #watch-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
 </style>
 </head>
 <body>
-  <div id="topbar"><h1 id="app-title">My Movie Universe</h1><button id="reset-btn" style="margin-left:auto;">reset view</button></div>
+  <div id="topbar">
+    <h1 id="app-title">My Movie Universe</h1>
+    <div style="margin-left:auto;display:flex;gap:8px;">
+      <button id="draft-btn">Draft tonight's movies</button>
+      <button id="reset-btn">Reset view</button>
+    </div>
+  </div>
   <p id="hint">scroll or pinch to zoom &middot; drag to pan &middot; zoom into a cluster to see individual titles</p>
   <div id="stage"><svg id="world" width="100%" height="100%" viewBox="0 0 680 420"><g id="g"></g></svg></div>
   <div id="status">Loading your collection…</div>
   <div id="detail"></div>
+  <div id="draft-root"></div>
 
 <script>
 // If your title field in Airtable is called something other than one of
@@ -393,6 +498,146 @@ stage.addEventListener("touchmove", (e) => {
 }, { passive: false });
 window.addEventListener("touchend", () => { dragging = false; touchStartDist = null; touchAnchor = null; });
 document.getElementById("reset-btn").onclick = () => { tx = 0; ty = 0; scale = 1; render(); };
+
+// --- movie draft ---
+let draftGenres = new Set();
+let draftPicks = [];
+let draftChosenIndex = null;
+let lastDraftIds = null;
+
+function availableGenres() {
+  return Array.from(new Set(movies.map((m) => m[curCat]).filter(Boolean))).sort();
+}
+
+// Joins a list the way you'd say it out loud: "Sci-Fi", "Sci-Fi or Fantasy",
+// "Sci-Fi, Fantasy, or Action", no oxford comma before a lone pair.
+function joinWithOr(list) {
+  if (list.length === 0) return "";
+  if (list.length === 1) return list[0];
+  if (list.length === 2) return `${list[0]} or ${list[1]}`;
+  return `${list.slice(0, -1).join(", ")}, or ${list[list.length - 1]}`;
+}
+
+function openDraft() {
+  draftGenres = new Set();
+  draftPicks = [];
+  draftChosenIndex = null;
+  lastDraftIds = null;
+  renderDraft();
+}
+
+function closeDraft() {
+  document.getElementById("draft-root").innerHTML = "";
+}
+
+function toggleDraftGenre(g) {
+  if (draftGenres.has(g)) draftGenres.delete(g); else draftGenres.add(g);
+  draftChosenIndex = null;
+  redraw();
+  renderDraft();
+}
+
+// Picks 3 movies at random from whatever matches the selected genres,
+// trying (not guaranteeing, if the pool is small) to avoid handing back
+// the exact same three as last time.
+function redraw() {
+  const selected = Array.from(draftGenres);
+  const pool = selected.length === 0
+    ? []
+    : movies.filter((m) => selected.includes(m[curCat]));
+
+  if (pool.length === 0) { draftPicks = []; return; }
+
+  let picks, attempts = 0;
+  do {
+    picks = [...pool].sort(() => Math.random() - 0.5).slice(0, 3);
+    attempts++;
+  } while (
+    attempts < 6 &&
+    pool.length > 3 &&
+    lastDraftIds &&
+    sameIds(picks, lastDraftIds)
+  );
+  lastDraftIds = picks.map((m) => m.id).sort();
+  draftPicks = picks;
+}
+
+function sameIds(picks, ids) {
+  const a = picks.map((m) => m.id).sort();
+  return a.length === ids.length && a.every((id, i) => id === ids[i]);
+}
+
+function reDraft() {
+  draftChosenIndex = null;
+  redraw();
+  renderDraft();
+}
+
+function selectDraftTile(i) {
+  draftChosenIndex = i;
+  renderDraft();
+}
+
+function watchThisMovie() {
+  if (draftChosenIndex === null) return;
+  const chosen = draftPicks[draftChosenIndex];
+  // TODO: write today's date back to the "Last Watched" column in
+  // Airtable for `chosen.id` once write access is wired up.
+  closeDraft();
+}
+
+function renderDraft() {
+  const genres = availableGenres();
+  const selected = Array.from(draftGenres);
+
+  const chipsHtml = genres.map((g) => `
+    <button class="genre-chip ${draftGenres.has(g) ? "selected" : ""}" onclick="toggleDraftGenre('${g.replace(/'/g, "\\'")}')">${g}</button>
+  `).join("");
+
+  const sentenceFill = selected.length
+    ? `<span class="filled">${joinWithOr(selected)}</span>`
+    : `<span class="empty">a genre</span>`;
+
+  const tilesHtml = draftPicks.map((m, i) => {
+    const description = getField(m, DESCRIPTION_FIELD_CANDIDATES);
+    const short = description && description.length > 110
+      ? description.slice(0, 110).trim() + "…"
+      : description;
+    const rows = [[curCat, m[curCat]]];
+    const audience = categoryFields.find((f) => f.toLowerCase() === "audience");
+    if (audience && m[audience]) rows.push([audience, m[audience]]);
+    return `
+      <div class="draft-tile ${draftChosenIndex === i ? "selected" : ""}" onclick="selectDraftTile(${i})">
+        <h3>${getTitle(m)}</h3>
+        ${rows.map(([label, value]) => `
+          <div class="field">
+            <div class="field-label">${label}</div>
+            <div class="field-value">${value}</div>
+          </div>`).join("")}
+        ${short ? `<div class="field"><div class="field-value">${short}</div></div>` : ""}
+      </div>`;
+  }).join("");
+
+  const emptyPoolNote = selected.length && draftPicks.length === 0
+    ? `<p class="draft-hint">No movies match that combination yet.</p>` : "";
+
+  document.getElementById("draft-root").innerHTML = `
+    <div id="draft-overlay" onclick="if(event.target.id==='draft-overlay') closeDraft()">
+      <div id="draft-card">
+        <button id="draft-close" onclick="closeDraft()">&times;</button>
+        <p id="draft-sentence">I want to watch a ${sentenceFill} movie.</p>
+        <div class="genre-chips">${chipsHtml}</div>
+        ${emptyPoolNote}
+        ${draftPicks.length ? `<div class="draft-tiles">${tilesHtml}</div>` : ""}
+        <div class="draft-actions">
+          <button id="redraft-btn" onclick="reDraft()" ${draftPicks.length ? "" : "disabled"}>Re-draft</button>
+          <button id="watch-btn" onclick="watchThisMovie()" ${draftChosenIndex === null ? "disabled" : ""}>Let's watch this!</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+document.getElementById("draft-btn").onclick = openDraft;
 
 // --- load real data ---
 fetch("/api/movies")
