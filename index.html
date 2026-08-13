@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Movie Map Browser</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1115;
+    color: #e8e8ec;
+  }
+  #topbar {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 12px 16px;
+  }
+  button {
+    background: #1c1f26;
+    color: #e8e8ec;
+    border: 1px solid #2c303a;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button.active { border-color: #6ea8fe; color: #6ea8fe; }
+  #stage {
+    position: relative;
+    width: 100%;
+    height: calc(100vh - 130px);
+    background: #14161c;
+    touch-action: none;
+    cursor: grab;
+    overflow: hidden;
+  }
+  #hint {
+    font-size: 12px;
+    color: #8a8f99;
+    padding: 0 16px;
+  }
+  #detail {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+  }
+  #detail .card {
+    background: #1c1f26;
+    border: 1px solid #2c303a;
+    border-radius: 12px;
+    padding: 14px 16px;
+  }
+  #status { padding: 16px; color: #8a8f99; font-size: 14px; }
+  .cluster-circle { fill: #2a6f6a; }
+  .movie-dot { fill: #e07856; }
+  text { fill: #e8e8ec; font-size: 11px; text-anchor: middle; }
+</style>
+</head>
+<body>
+  <div id="topbar"><div id="cat-switcher"></div><button id="reset-btn" style="margin-left:auto;">reset view</button></div>
+  <p id="hint">scroll or pinch to zoom &middot; drag to pan &middot; zoom into a cluster to see individual titles</p>
+  <div id="stage"><svg id="world" width="100%" height="100%" viewBox="0 0 680 420"><g id="g"></g></svg></div>
+  <div id="status">Loading your collection…</div>
+  <div id="detail"></div>
+
+<script>
+// If your title field in Airtable is called something other than one of
+// these, add it to the front of this list.
+const TITLE_FIELD_CANDIDATES = ["Name", "Title", "Movie", "Movie Title"];
+
+// Fields to ignore when building clustering options (not useful as
+// categories to browse by).
+const IGNORE_FIELDS = new Set(["id", ...TITLE_FIELD_CANDIDATES]);
+
+let movies = [];
+let categoryFields = [];
+let curCat = null;
+let tx = 0, ty = 0, scale = 1;
+const DECLUSTER = 1.7;
+
+function getTitle(m) {
+  for (const f of TITLE_FIELD_CANDIDATES) if (m[f]) return m[f];
+  return "untitled";
+}
+
+function detectCategoryFields(list) {
+  // A field is a good clustering candidate if it's a plain string
+  // (single-select/text) present on most records, not wildly unique
+  // (that would just be the title again) and not a number.
+  const counts = {};
+  list.forEach((m) => {
+    Object.entries(m).forEach(([k, v]) => {
+      if (IGNORE_FIELDS.has(k)) return;
+      if (typeof v !== "string") return;
+      counts[k] = counts[k] || new Set();
+      counts[k].add(v);
+    });
+  });
+  return Object.keys(counts).filter((k) => counts[k].size < list.length * 0.8);
+}
+
+function keyFor(m, field) {
+  return m[field] || "unspecified";
+}
+
+function layout() {
+  const groups = {};
+  movies.forEach((m) => {
+    const k = keyFor(m, curCat);
+    (groups[k] = groups[k] || []).push(m);
+  });
+  const keys = Object.keys(groups);
+  const cols = Math.ceil(Math.sqrt(keys.length));
+  const spacing = 220;
+  keys.forEach((k, i) => {
+    const col = i % cols, row = Math.floor(i / cols);
+    const cx = 120 + col * spacing, cy = 100 + row * spacing;
+    const items = groups[k];
+    items.forEach((m, j) => {
+      const ang = (j / items.length) * 2 * Math.PI;
+      const r = 18 + Math.min(items.length, 10) * 4;
+      m._x = cx + (items.length > 1 ? r * Math.cos(ang) : 0);
+      m._y = cy + (items.length > 1 ? r * Math.sin(ang) : 0);
+      m._cx = cx; m._cy = cy; m._key = k; m._n = items.length;
+    });
+  });
+}
+
+function render() {
+  const g = document.getElementById("g");
+  g.setAttribute("transform", `translate(${tx},${ty}) scale(${scale})`);
+  let svg = "";
+  const seen = {};
+  if (scale < DECLUSTER) {
+    movies.forEach((m) => {
+      if (seen[m._key]) return; seen[m._key] = true;
+      const r = 22 + m._n * 2.5;
+      svg += `<circle cx="${m._cx}" cy="${m._cy}" r="${r}" class="cluster-circle" style="cursor:pointer"/>
+        <text x="${m._cx}" y="${m._cy + 4}">${m._key} (${m._n})</text>`;
+    });
+  } else {
+    movies.forEach((m) => {
+      svg += `<circle cx="${m._x}" cy="${m._y}" r="14" class="movie-dot" style="cursor:pointer" onclick="showDetail('${m.id}')"/>
+        <text x="${m._x}" y="${m._y + 24}">${getTitle(m)}</text>`;
+    });
+  }
+  g.innerHTML = svg;
+}
+
+function renderSwitcher() {
+  const el = document.getElementById("cat-switcher");
+  el.innerHTML = "";
+  categoryFields.forEach((field) => {
+    const b = document.createElement("button");
+    b.textContent = field;
+    if (field === curCat) b.classList.add("active");
+    b.onclick = () => { curCat = field; layout(); render(); renderSwitcher(); };
+    el.appendChild(b);
+  });
+}
+
+function showDetail(id) {
+  const m = movies.find((x) => x.id === id);
+  const fields = Object.entries(m)
+    .filter(([k]) => k !== "id" && !TITLE_FIELD_CANDIDATES.includes(k))
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(" &middot; ");
+  document.getElementById("detail").innerHTML = `
+    <div class="card">
+      <p style="font-weight:600;font-size:16px;margin:0 0 6px;">${getTitle(m)}</p>
+      <p style="font-size:13px;color:#8a8f99;margin:0;">${fields}</p>
+    </div>`;
+}
+
+// --- pan / zoom wiring ---
+const stage = document.getElementById("stage");
+let dragging = false, lastX = 0, lastY = 0;
+stage.addEventListener("mousedown", (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; stage.style.cursor = "grabbing"; });
+window.addEventListener("mouseup", () => { dragging = false; stage.style.cursor = "grab"; });
+window.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  tx += e.clientX - lastX; ty += e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY; render();
+});
+stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  scale = Math.min(4, Math.max(0.5, scale * delta));
+  render();
+}, { passive: false });
+let touchStartDist = null, touchStartScale = 1;
+stage.addEventListener("touchstart", (e) => {
+  if (e.touches.length === 2) {
+    const [a, b] = e.touches;
+    touchStartDist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    touchStartScale = scale;
+  } else if (e.touches.length === 1) {
+    dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+  }
+});
+stage.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  if (e.touches.length === 2 && touchStartDist) {
+    const [a, b] = e.touches;
+    const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    scale = Math.min(4, Math.max(0.5, touchStartScale * (dist / touchStartDist)));
+    render();
+  } else if (e.touches.length === 1 && dragging) {
+    tx += e.touches[0].clientX - lastX; ty += e.touches[0].clientY - lastY;
+    lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; render();
+  }
+}, { passive: false });
+window.addEventListener("touchend", () => { dragging = false; touchStartDist = null; });
+document.getElementById("reset-btn").onclick = () => { tx = 0; ty = 0; scale = 1; render(); };
+
+// --- load real data ---
+fetch("/api/movies")
+  .then((r) => r.json())
+  .then((data) => {
+    if (data.error) throw new Error(data.error);
+    movies = data.movies;
+    document.getElementById("status").style.display = "none";
+    categoryFields = detectCategoryFields(movies);
+    curCat = categoryFields[0];
+    layout(); render(); renderSwitcher();
+  })
+  .catch((err) => {
+    document.getElementById("status").textContent = "Couldn't load collection: " + err.message;
+  });
+</script>
+</body>
+</html>
