@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>Movie Map Browser</title>
+<title>My Movie Universe</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -49,6 +49,9 @@
     touch-action: none;
     cursor: grab;
     overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
   }
   #hint {
     font-size: 12px;
@@ -230,7 +233,7 @@
     </div>
   </div>
   <p id="hint">scroll or pinch to zoom &middot; drag to pan &middot; zoom into a cluster to see individual titles</p>
-  <div id="stage"><svg id="world" width="100%" height="100%" viewBox="0 0 680 420"><g id="g"></g></svg></div>
+  <div id="stage"><svg id="world" width="100%" height="100%" viewBox="0 0 680 420"><defs id="defs"></defs><g id="g"></g></svg></div>
   <div id="status">Loading your collection…</div>
   <div id="detail"></div>
   <div id="draft-root"></div>
@@ -244,6 +247,32 @@ const GENRE_FIELD_CANDIDATES = ["Genre"];
 // use something else for long-form text, so a few common alternatives
 // are checked too.
 const DESCRIPTION_FIELD_CANDIDATES = ["Description", "Synopsis", "Summary", "Notes"];
+const RUNTIME_FIELD_CANDIDATES = ["Runtime (Official Theatrical, Minutes)", "Runtime", "Run Time"];
+// Handles either shape Airtable might hand back: a plain URL string field,
+// a real Attachment field (an array of attachment objects), or an
+// AI-generated image field, which can wrap the value in { value, state }
+// the same way the Description AI field does.
+const COVER_ART_FIELD_CANDIDATES = ["Cover Art (Web Image)", "Cover Art", "Cover", "Poster"];
+
+function getCoverArtUrl(m) {
+  for (const f of COVER_ART_FIELD_CANDIDATES) {
+    let v = m[f];
+    if (!v) continue;
+    if (!Array.isArray(v) && typeof v === "object" && v.value !== undefined) v = v.value;
+    if (!v) continue;
+    if (typeof v === "string") return v;
+    if (Array.isArray(v) && v.length > 0) {
+      const att = v[0];
+      if (typeof att === "string") return att;
+      const url = (att.thumbnails && (att.thumbnails.large || att.thumbnails.full))
+        ? (att.thumbnails.large || att.thumbnails.full).url
+        : att.url;
+      if (url) return url;
+    }
+    if (typeof v === "object" && typeof v.url === "string") return v.url;
+  }
+  return null;
+}
 
 function getField(m, candidates) {
   for (const f of candidates) {
@@ -262,7 +291,7 @@ function getField(m, candidates) {
 
 // Fields to ignore when building clustering options (not useful as
 // categories to browse by).
-const IGNORE_FIELDS = new Set(["id", ...TITLE_FIELD_CANDIDATES]);
+const IGNORE_FIELDS = new Set(["id", ...TITLE_FIELD_CANDIDATES, ...COVER_ART_FIELD_CANDIDATES, ...RUNTIME_FIELD_CANDIDATES]);
 
 let movies = [];
 let categoryFields = [];
@@ -358,7 +387,9 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 // rebuilding the whole scene as a string (expensive at 60fps).
 function buildDom() {
   const g = document.getElementById("g");
+  const defs = document.getElementById("defs");
   g.innerHTML = "";
+  defs.innerHTML = "";
   // Spoke lines go in first, so they sit visually behind the cluster
   // circles and title dots, connecting each title back to its genre's
   // center even as everything drifts independently.
@@ -383,6 +414,35 @@ function buildDom() {
     const dot = document.createElementNS(SVG_NS, "circle");
     dot.setAttribute("class", "movie-dot");
     dot.style.cursor = "pointer";
+
+    // If cover art exists, fill the dot with it via a pattern instead of
+    // the flat color. objectBoundingBox units mean the image auto-scales
+    // to whatever radius the circle currently has, no per-frame syncing
+    // needed. No art yet, no change, it stays the default planet shape.
+    const coverUrl = getCoverArtUrl(m);
+    if (coverUrl) {
+      const patternId = `cover-${m.id}`;
+      const pattern = document.createElementNS(SVG_NS, "pattern");
+      pattern.setAttribute("id", patternId);
+      pattern.setAttribute("patternUnits", "objectBoundingBox");
+      pattern.setAttribute("patternContentUnits", "objectBoundingBox");
+      pattern.setAttribute("width", "1");
+      pattern.setAttribute("height", "1");
+      const image = document.createElementNS(SVG_NS, "image");
+      image.setAttributeNS("http://www.w3.org/1999/xlink", "href", coverUrl);
+      image.setAttribute("href", coverUrl);
+      image.setAttribute("x", "0");
+      image.setAttribute("y", "0");
+      image.setAttribute("width", "1");
+      image.setAttribute("height", "1");
+      image.setAttribute("preserveAspectRatio", "xMidYMid slice");
+      pattern.appendChild(image);
+      defs.appendChild(pattern);
+      dot.setAttribute("fill", `url(#${patternId})`);
+      dot.setAttribute("stroke", "#0f1115");
+      dot.setAttribute("stroke-width", "1");
+    }
+
     dot.addEventListener("click", (e) => { e.stopPropagation(); showDetail(m.id); });
     const text = document.createElementNS(SVG_NS, "text");
     text.textContent = getTitle(m);
@@ -486,9 +546,15 @@ function showDetail(id) {
   const m = movies.find((x) => x.id === id);
   if (!m) return;
   const rows = [];
-  // Genre first, since it's the organizing field, then every other
-  // detected column that has a value, then Description last.
+  // Genre first, since it's the organizing field, then Runtime (a quick
+  // scannable fact), then every other detected column with a value,
+  // then Description last.
   if (m[curCat]) rows.push([curCat, m[curCat]]);
+  const runtime = getField(m, RUNTIME_FIELD_CANDIDATES);
+  if (runtime) {
+    const clean = String(runtime).trim();
+    rows.push(["Runtime", /^\d+$/.test(clean) ? `${clean} min` : clean]);
+  }
   categoryFields.forEach((field) => {
     if (field === curCat) return;
     const v = m[field];
@@ -546,7 +612,7 @@ function toSvgPoint(clientX, clientY) {
 }
 
 let dragging = false, lastX = 0, lastY = 0;
-stage.addEventListener("mousedown", (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; stage.style.cursor = "grabbing"; });
+stage.addEventListener("mousedown", (e) => { e.preventDefault(); dragging = true; lastX = e.clientX; lastY = e.clientY; stage.style.cursor = "grabbing"; });
 window.addEventListener("mouseup", () => { dragging = false; stage.style.cursor = "grab"; });
 window.addEventListener("mousemove", (e) => {
   if (!dragging) return;
