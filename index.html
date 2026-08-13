@@ -57,9 +57,9 @@
     padding: 14px 16px;
   }
   #status { padding: 16px; color: #8a8f99; font-size: 14px; }
-  .cluster-circle { fill: #2a6f6a; }
-  .movie-dot { fill: #e07856; }
-  text { fill: #e8e8ec; font-size: 11px; text-anchor: middle; }
+  .cluster-circle { fill: #2a6f6a; transition: opacity 80ms linear; }
+  .movie-dot { fill: #e07856; transition: opacity 80ms linear; }
+  text { fill: #e8e8ec; font-size: 11px; text-anchor: middle; transition: opacity 80ms linear; }
 </style>
 </head>
 <body>
@@ -82,8 +82,6 @@ let movies = [];
 let categoryFields = [];
 let curCat = null;
 let tx = 0, ty = 0, scale = 1;
-const DECLUSTER = 1.7;
-
 function getTitle(m) {
   for (const f of TITLE_FIELD_CANDIDATES) if (m[f]) return m[f];
   return "untitled";
@@ -144,22 +142,48 @@ function layout() {
   movies.forEach((m) => { m._x = m.x; m._y = m.y; });
 }
 
+// Instead of a single cutoff, titles emerge gradually across a zoom
+// range so the transition feels like it's happening, not flipping.
+const DECLUSTER_START = 1.3;
+const DECLUSTER_END = 1.9;
+
 function render() {
   const g = document.getElementById("g");
   g.setAttribute("transform", `translate(${tx},${ty}) scale(${scale})`);
+  // t = 0 fully clustered, t = 1 fully declustered into individual titles
+  const t = Math.max(0, Math.min(1,
+    (scale - DECLUSTER_START) / (DECLUSTER_END - DECLUSTER_START)));
   let svg = "";
   const seen = {};
-  if (scale < DECLUSTER) {
+
+  // Cluster circles are always drawn as the background layer, so the
+  // genre grouping stays visible even once you're looking at titles.
+  // They only dim slightly (down to 75% opacity), never vanish, so
+  // there's a clear boundary showing which cluster you're inside.
+  movies.forEach((m) => {
+    if (seen[m._key]) return; seen[m._key] = true;
+    const r = 22 + m._n * 2.5;
+    const circleOpacity = 1 - t * 0.25;
+    const labelOpacity = 1 - t; // count label fades out once titles take over
+    svg += `<circle cx="${m._cx}" cy="${m._cy}" r="${r}" class="cluster-circle" style="opacity:${circleOpacity};cursor:pointer"/>`;
+    if (labelOpacity > 0.03) {
+      svg += `<text x="${m._cx}" y="${m._cy + 4}" style="opacity:${labelOpacity}">${m._key} (${m._n})</text>`;
+    }
+  });
+
+  // Individual titles emerge from their cluster's center point and
+  // travel outward to their settled (force-simulated) position as t
+  // increases, fading in along the way rather than popping in place.
+  if (t > 0.003) {
     movies.forEach((m) => {
-      if (seen[m._key]) return; seen[m._key] = true;
-      const r = 22 + m._n * 2.5;
-      svg += `<circle cx="${m._cx}" cy="${m._cy}" r="${r}" class="cluster-circle" style="cursor:pointer"/>
-        <text x="${m._cx}" y="${m._cy + 4}">${m._key} (${m._n})</text>`;
-    });
-  } else {
-    movies.forEach((m) => {
-      svg += `<circle cx="${m._x}" cy="${m._y}" r="14" class="movie-dot" style="cursor:pointer" onclick="showDetail('${m.id}')"/>
-        <text x="${m._x}" y="${m._y + 24}">${getTitle(m)}</text>`;
+      const ex = m._cx + t * (m._x - m._cx);
+      const ey = m._cy + t * (m._y - m._cy);
+      const r = 4 + 10 * t;
+      const titleOpacity = Math.max(0, (t - 0.5) * 2);
+      svg += `<circle cx="${ex}" cy="${ey}" r="${r}" class="movie-dot" style="opacity:${t};cursor:pointer" onclick="showDetail('${m.id}')"/>`;
+      if (titleOpacity > 0.03) {
+        svg += `<text x="${ex}" y="${ey + 22}" style="opacity:${titleOpacity}">${getTitle(m)}</text>`;
+      }
     });
   }
   g.innerHTML = svg;
