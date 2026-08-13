@@ -555,14 +555,14 @@ function render(now) {
     c._renderCx = cx; c._renderCy = cy;
     const r = 22 + c.n * 2.5;
     const circleOpacity = 1 - t * 0.25;
-    const labelOpacity = 1 - t;
+    const labelOpacity = 1 - t * 0.5; // floors at 50%, never fully disappears
     c.circleEl.setAttribute("cx", cx);
     c.circleEl.setAttribute("cy", cy);
     c.circleEl.setAttribute("r", r);
     c.circleEl.style.opacity = circleOpacity;
     c.textEl.setAttribute("x", cx);
     c.textEl.setAttribute("y", cy + 4);
-    c.textEl.style.opacity = labelOpacity > 0.03 ? labelOpacity : 0;
+    c.textEl.style.opacity = labelOpacity;
   });
 
   // Individual titles emerge from their cluster's center and travel
