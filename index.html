@@ -57,6 +57,7 @@
   }
   #status { padding: 16px; color: #8a8f99; font-size: 14px; }
   .cluster-circle { fill: #2a6f6a; transition: opacity 80ms linear; }
+  .orbit-line { stroke: #2a6f6a; stroke-width: 1; transition: opacity 80ms linear; }
   .movie-dot { fill: #e07856; transition: opacity 80ms linear; }
   text { fill: #e8e8ec; font-size: 11px; font-family: 'Space Mono', monospace; text-anchor: middle; transition: opacity 80ms linear; }
 
@@ -358,6 +359,15 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 function buildDom() {
   const g = document.getElementById("g");
   g.innerHTML = "";
+  // Spoke lines go in first, so they sit visually behind the cluster
+  // circles and title dots, connecting each title back to its genre's
+  // center even as everything drifts independently.
+  movies.forEach((m) => {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("class", "orbit-line");
+    g.appendChild(line);
+    m._lineEl = line;
+  });
   Object.entries(clusterMeta).forEach(([key, c]) => {
     const circle = document.createElementNS(SVG_NS, "circle");
     circle.setAttribute("class", "cluster-circle");
@@ -439,6 +449,11 @@ function render(now) {
     const ex = m._cx + t * (m._x - m._cx) + driftX;
     const ey = m._cy + t * (m._y - m._cy) + driftY;
     m._renderX = ex; m._renderY = ey; // used for nearest-title click lookup
+    m._lineEl.setAttribute("x1", c._renderCx);
+    m._lineEl.setAttribute("y1", c._renderCy);
+    m._lineEl.setAttribute("x2", ex);
+    m._lineEl.setAttribute("y2", ey);
+    m._lineEl.style.opacity = t * 0.45; // stays subtle, never competes with the dot or label
     const r = 4 + 10 * t;
     const titleOpacity = Math.max(0, (t - 0.5) * 2);
     m._dotEl.setAttribute("cx", ex);
