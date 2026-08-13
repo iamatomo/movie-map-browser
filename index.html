@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>My Movie Universe</title>
+<title>Movie Map Browser</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -438,7 +438,10 @@ function buildDom() {
       image.setAttribute("preserveAspectRatio", "xMidYMid slice");
       pattern.appendChild(image);
       defs.appendChild(pattern);
-      dot.setAttribute("fill", `url(#${patternId})`);
+      // Using style (not setAttribute) here matters: the .movie-dot CSS
+      // class also sets fill, and a class rule beats a plain attribute
+      // in SVG, so setAttribute alone would get silently overridden.
+      dot.style.fill = `url(#${patternId})`;
       dot.setAttribute("stroke", "#0f1115");
       dot.setAttribute("stroke-width", "1");
     }
