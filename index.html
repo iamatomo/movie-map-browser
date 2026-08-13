@@ -134,7 +134,17 @@ const AUDIENCE_FIELD_CANDIDATES = ["Audience"];
 const DESCRIPTION_FIELD_CANDIDATES = ["Description", "Synopsis", "Summary", "Notes"];
 
 function getField(m, candidates) {
-  for (const f of candidates) if (m[f]) return m[f];
+  for (const f of candidates) {
+    const v = m[f];
+    if (v === undefined || v === null || v === "") continue;
+    // Airtable AI fields return an object like { value, state } instead
+    // of a plain string, so unwrap that shape if present.
+    if (typeof v === "object") {
+      if (typeof v.value === "string" && v.value) return v.value;
+      continue;
+    }
+    return v;
+  }
   return null;
 }
 
