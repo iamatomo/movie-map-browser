@@ -34,6 +34,13 @@
     cursor: pointer;
   }
   button.active { border-color: #6ea8fe; color: #6ea8fe; }
+  #app-title {
+    font-family: 'Space Mono', monospace;
+    font-weight: 700;
+    font-size: 18px;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
   #stage {
     position: relative;
     width: 100%;
@@ -116,7 +123,7 @@
 </style>
 </head>
 <body>
-  <div id="topbar"><div id="cat-switcher"></div><button id="reset-btn" style="margin-left:auto;">reset view</button></div>
+  <div id="topbar"><h1 id="app-title">My Movie Universe</h1><button id="reset-btn" style="margin-left:auto;">reset view</button></div>
   <p id="hint">scroll or pinch to zoom &middot; drag to pan &middot; zoom into a cluster to see individual titles</p>
   <div id="stage"><svg id="world" width="100%" height="100%" viewBox="0 0 680 420"><g id="g"></g></svg></div>
   <div id="status">Loading your collection…</div>
@@ -127,7 +134,6 @@
 // these, add it to the front of this list.
 const TITLE_FIELD_CANDIDATES = ["Name", "Title", "Movie", "Movie Title"];
 const GENRE_FIELD_CANDIDATES = ["Genre"];
-const AUDIENCE_FIELD_CANDIDATES = ["Audience"];
 // "Description" is the field name that was asked for, but a lot of bases
 // use something else for long-form text, so a few common alternatives
 // are checked too.
@@ -268,26 +274,20 @@ function render() {
   g.innerHTML = svg;
 }
 
-function renderSwitcher() {
-  const el = document.getElementById("cat-switcher");
-  el.innerHTML = "";
-  categoryFields.forEach((field) => {
-    const b = document.createElement("button");
-    b.textContent = field;
-    if (field === curCat) b.classList.add("active");
-    b.onclick = () => { curCat = field; layout(); render(); renderSwitcher(); };
-    el.appendChild(b);
-  });
-}
-
 function showDetail(id) {
   const m = movies.find((x) => x.id === id);
   if (!m) return;
-  const rows = [
-    ["Genre", getField(m, GENRE_FIELD_CANDIDATES)],
-    ["Audience", getField(m, AUDIENCE_FIELD_CANDIDATES)],
-    ["Description", getField(m, DESCRIPTION_FIELD_CANDIDATES)],
-  ].filter(([, value]) => value);
+  const rows = [];
+  // Genre first, since it's the organizing field, then every other
+  // detected column that has a value, then Description last.
+  if (m[curCat]) rows.push([curCat, m[curCat]]);
+  categoryFields.forEach((field) => {
+    if (field === curCat) return;
+    const v = m[field];
+    if (typeof v === "string" && v) rows.push([field, v]);
+  });
+  const description = getField(m, DESCRIPTION_FIELD_CANDIDATES);
+  if (description) rows.push(["Description", description]);
 
   document.getElementById("detail").innerHTML = `
     <div id="modal-overlay" onclick="if(event.target.id==='modal-overlay') closeModal()">
@@ -402,8 +402,9 @@ fetch("/api/movies")
     movies = data.movies;
     document.getElementById("status").style.display = "none";
     categoryFields = detectCategoryFields(movies);
-    curCat = categoryFields[0];
-    layout(); render(); renderSwitcher();
+    // Always cluster by genre, no switching.
+    curCat = GENRE_FIELD_CANDIDATES.find((f) => categoryFields.includes(f)) || categoryFields[0];
+    layout(); render();
   })
   .catch((err) => {
     document.getElementById("status").textContent = "Couldn't load collection: " + err.message;
