@@ -59,6 +59,25 @@
     padding: 0 16px;
   }
   #status { padding: 16px; color: #8a8f99; font-size: 14px; }
+  #zoom-controls {
+    position: absolute;
+    right: 16px;
+    bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 10;
+  }
+  #zoom-controls button {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    font-size: 20px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
   .cluster-circle { fill: #2a6f6a; transition: opacity 80ms linear; }
   .orbit-line { stroke: #2a6f6a; stroke-width: 1; transition: opacity 80ms linear; }
   .movie-dot { fill: #e07856; transition: opacity 80ms linear; }
@@ -167,14 +186,35 @@
   }
   #draft-sentence .filled { color: #e07856; font-weight: 700; }
   #draft-sentence .empty { color: #565b66; }
+  #draft-sentence .blank {
+    cursor: pointer;
+    border-bottom: 1px dashed #565b66;
+    padding-bottom: 1px;
+  }
+  #draft-sentence .blank.active { border-bottom-color: #e07856; }
+  .picker-panel {
+    background: #14161c;
+    border: 1px solid #2c303a;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 22px;
+  }
+  .picker-label {
+    font-family: 'Space Mono', monospace;
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #8a8f99;
+    margin-bottom: 10px;
+  }
   .genre-chips {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 26px;
   }
   .genre-chip {
-    background: #14161c;
+    background: #1c1f26;
     border: 1px solid #2c303a;
     color: #e8e8ec;
   }
@@ -233,7 +273,13 @@
     </div>
   </div>
   <p id="hint">scroll or pinch to zoom &middot; drag to pan &middot; zoom into a cluster to see individual titles</p>
-  <div id="stage"><svg id="world" width="100%" height="100%" viewBox="0 0 680 420"><defs id="defs"></defs><g id="g"></g></svg></div>
+  <div id="stage">
+    <svg id="world" width="100%" height="100%" viewBox="0 0 680 420"><defs id="defs"></defs><g id="g"></g></svg>
+    <div id="zoom-controls">
+      <button id="zoom-in-btn" aria-label="Zoom in">+</button>
+      <button id="zoom-out-btn" aria-label="Zoom out">&minus;</button>
+    </div>
+  </div>
   <div id="status">Loading your collection…</div>
   <div id="detail"></div>
   <div id="draft-root"></div>
@@ -296,7 +342,8 @@ const IGNORE_FIELDS = new Set(["id", ...TITLE_FIELD_CANDIDATES, ...COVER_ART_FIE
 let movies = [];
 let categoryFields = [];
 let curCat = null;
-let tx = 0, ty = 0, scale = 1;
+const MIN_SCALE = 0.5, MAX_SCALE = 4;
+let tx = 0, ty = 0, scale = MIN_SCALE; // start fully zoomed out
 let currentT = 0;
 let clusterMeta = {};
 let interactionBoost = 0; // rises on pan/zoom, decays back toward 0 when idle
@@ -633,7 +680,7 @@ stage.addEventListener("wheel", (e) => {
   const worldX = (p.x - tx) / scale;
   const worldY = (p.y - ty) / scale;
   const zoomFactor = Math.exp(-e.deltaY * 0.0015);
-  const newScale = Math.min(4, Math.max(0.5, scale * zoomFactor));
+  const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * zoomFactor));
   tx = p.x - worldX * newScale;
   ty = p.y - worldY * newScale;
   scale = newScale;
@@ -661,7 +708,7 @@ stage.addEventListener("touchmove", (e) => {
   if (e.touches.length === 2 && touchStartDist && touchAnchor) {
     const [a, b] = e.touches;
     const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-    const newScale = Math.min(4, Math.max(0.5, touchStartScale * (dist / touchStartDist)));
+    const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, touchStartScale * (dist / touchStartDist)));
     tx = touchAnchor.x - touchAnchor.worldX * newScale;
     ty = touchAnchor.y - touchAnchor.worldY * newScale;
     scale = newScale;
@@ -675,13 +722,53 @@ stage.addEventListener("touchmove", (e) => {
   }
 }, { passive: false });
 window.addEventListener("touchend", () => { dragging = false; touchStartDist = null; touchAnchor = null; });
-document.getElementById("reset-btn").onclick = () => { tx = 0; ty = 0; scale = 1; render(); };
+document.getElementById("reset-btn").onclick = () => { tx = 0; ty = 0; scale = MIN_SCALE; interactionBoost = 1; render(); };
+
+// Manual +/- zoom, anchored to the center of the visible area using the
+// same anchor-preserving math as scroll/pinch zoom, just with a fixed
+// point instead of the cursor or finger midpoint.
+function stepZoom(factor) {
+  const rect = stage.getBoundingClientRect();
+  const p = toSvgPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  const worldX = (p.x - tx) / scale;
+  const worldY = (p.y - ty) / scale;
+  const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * factor));
+  tx = p.x - worldX * newScale;
+  ty = p.y - worldY * newScale;
+  scale = newScale;
+  interactionBoost = 1;
+  render();
+}
+document.getElementById("zoom-in-btn").onclick = () => stepZoom(1.3);
+document.getElementById("zoom-out-btn").onclick = () => stepZoom(1 / 1.3);
 
 // --- movie draft ---
 let draftGenres = new Set();
+let draftRuntimes = new Set();
 let draftPicks = [];
 let draftChosenIndex = null;
 let lastDraftIds = null;
+let activePicker = null; // null | 'genre' | 'runtime' — which blank's chips are showing
+
+const RUNTIME_BUCKETS = ["short", "medium", "long", "epic"];
+const RUNTIME_BUCKET_LABELS = { short: "Short", medium: "Medium", long: "Long", epic: "Epic" };
+const RUNTIME_BUCKET_HINTS = {
+  short: "100 min or less",
+  medium: "101–140 min",
+  long: "141–160 min",
+  epic: "161 min or more",
+};
+
+function runtimeBucket(m) {
+  const raw = getField(m, RUNTIME_FIELD_CANDIDATES);
+  if (!raw) return null;
+  const n = parseInt(String(raw).replace(/[^0-9]/g, ""), 10);
+  if (isNaN(n)) return null;
+  if (n <= 100) return "short";
+  if (n <= 140) return "medium";
+  if (n <= 160) return "long";
+  return "epic";
+}
 
 function availableGenres() {
   return Array.from(new Set(movies.map((m) => m[curCat]).filter(Boolean))).sort();
@@ -698,14 +785,21 @@ function joinWithOr(list) {
 
 function openDraft() {
   draftGenres = new Set();
+  draftRuntimes = new Set();
   draftPicks = [];
   draftChosenIndex = null;
   lastDraftIds = null;
+  activePicker = null;
   renderDraft();
 }
 
 function closeDraft() {
   document.getElementById("draft-root").innerHTML = "";
+}
+
+function togglePicker(name) {
+  activePicker = activePicker === name ? null : name;
+  renderDraft();
 }
 
 function toggleDraftGenre(g) {
@@ -715,14 +809,26 @@ function toggleDraftGenre(g) {
   renderDraft();
 }
 
-// Picks 3 movies at random from whatever matches the selected genres,
-// trying (not guaranteeing, if the pool is small) to avoid handing back
-// the exact same three as last time.
+function toggleDraftRuntime(bucket) {
+  if (draftRuntimes.has(bucket)) draftRuntimes.delete(bucket); else draftRuntimes.add(bucket);
+  draftChosenIndex = null;
+  redraw();
+  renderDraft();
+}
+
+// Picks 3 movies at random from whatever matches the selected genres
+// (required) and runtime buckets (optional refinement), trying, not
+// guaranteeing, if the pool is small, to avoid handing back the exact
+// same three as last time.
 function redraw() {
-  const selected = Array.from(draftGenres);
-  const pool = selected.length === 0
+  const selectedGenres = Array.from(draftGenres);
+  const selectedRuntimes = Array.from(draftRuntimes);
+  const pool = selectedGenres.length === 0
     ? []
-    : movies.filter((m) => selected.includes(m[curCat]));
+    : movies.filter((m) =>
+        selectedGenres.includes(m[curCat]) &&
+        (selectedRuntimes.length === 0 || selectedRuntimes.includes(runtimeBucket(m)))
+      );
 
   if (pool.length === 0) { draftPicks = []; return; }
 
@@ -766,15 +872,37 @@ function watchThisMovie() {
 
 function renderDraft() {
   const genres = availableGenres();
-  const selected = Array.from(draftGenres);
+  const selectedGenres = Array.from(draftGenres);
+  const selectedRuntimes = Array.from(draftRuntimes);
 
-  const chipsHtml = genres.map((g) => `
-    <button class="genre-chip ${draftGenres.has(g) ? "selected" : ""}" onclick="toggleDraftGenre('${g.replace(/'/g, "\\'")}')">${g}</button>
-  `).join("");
+  const genreBlank = selectedGenres.length
+    ? `<span class="filled blank ${activePicker === "genre" ? "active" : ""}" onclick="togglePicker('genre')">${joinWithOr(selectedGenres)}</span>`
+    : `<span class="empty blank ${activePicker === "genre" ? "active" : ""}" onclick="togglePicker('genre')">a genre</span>`;
 
-  const sentenceFill = selected.length
-    ? `<span class="filled">${joinWithOr(selected)}</span>`
-    : `<span class="empty">a genre</span>`;
+  const runtimeBlank = selectedRuntimes.length
+    ? `<span class="filled blank ${activePicker === "runtime" ? "active" : ""}" onclick="togglePicker('runtime')">${joinWithOr(selectedRuntimes.map((b) => RUNTIME_BUCKET_LABELS[b].toLowerCase()))}</span>`
+    : `<span class="empty blank ${activePicker === "runtime" ? "active" : ""}" onclick="togglePicker('runtime')">any length</span>`;
+
+  let pickerHtml = "";
+  if (activePicker === "genre") {
+    const chips = genres.map((g) => `
+      <button class="genre-chip ${draftGenres.has(g) ? "selected" : ""}" onclick="toggleDraftGenre('${g.replace(/'/g, "\\'")}')">${g}</button>
+    `).join("");
+    pickerHtml = `
+      <div class="picker-panel">
+        <div class="picker-label">Genre</div>
+        <div class="genre-chips">${chips}</div>
+      </div>`;
+  } else if (activePicker === "runtime") {
+    const chips = RUNTIME_BUCKETS.map((b) => `
+      <button class="genre-chip ${draftRuntimes.has(b) ? "selected" : ""}" onclick="toggleDraftRuntime('${b}')">${RUNTIME_BUCKET_LABELS[b]} <span style="opacity:0.6;">(${RUNTIME_BUCKET_HINTS[b]})</span></button>
+    `).join("");
+    pickerHtml = `
+      <div class="picker-panel">
+        <div class="picker-label">Runtime</div>
+        <div class="genre-chips">${chips}</div>
+      </div>`;
+  }
 
   const tilesHtml = draftPicks.map((m, i) => {
     const description = getField(m, DESCRIPTION_FIELD_CANDIDATES);
@@ -782,6 +910,8 @@ function renderDraft() {
       ? description.slice(0, 110).trim() + "…"
       : description;
     const rows = [[curCat, m[curCat]]];
+    const runtime = getField(m, RUNTIME_FIELD_CANDIDATES);
+    if (runtime) rows.push(["Runtime", `${String(runtime).trim()} min`]);
     const audience = categoryFields.find((f) => f.toLowerCase() === "audience");
     if (audience && m[audience]) rows.push([audience, m[audience]]);
     return `
@@ -796,15 +926,15 @@ function renderDraft() {
       </div>`;
   }).join("");
 
-  const emptyPoolNote = selected.length && draftPicks.length === 0
+  const emptyPoolNote = selectedGenres.length && draftPicks.length === 0
     ? `<p class="draft-hint">No movies match that combination yet.</p>` : "";
 
   document.getElementById("draft-root").innerHTML = `
     <div id="draft-overlay" onclick="if(event.target.id==='draft-overlay') closeDraft()">
       <div id="draft-card">
         <button id="draft-close" onclick="closeDraft()">&times;</button>
-        <p id="draft-sentence">I want to watch a ${sentenceFill} movie.</p>
-        <div class="genre-chips">${chipsHtml}</div>
+        <p id="draft-sentence">I want to watch a ${genreBlank} movie that is ${runtimeBlank}.</p>
+        ${pickerHtml}
         ${emptyPoolNote}
         ${draftPicks.length ? `<div class="draft-tiles">${tilesHtml}</div>` : ""}
         <div class="draft-actions">
