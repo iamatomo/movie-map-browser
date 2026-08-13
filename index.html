@@ -191,6 +191,14 @@ function showDetail(id) {
 
 // --- pan / zoom wiring ---
 const stage = document.getElementById("stage");
+const svgEl = document.getElementById("world");
+
+function toSvgPoint(clientX, clientY) {
+  const pt = svgEl.createSVGPoint();
+  pt.x = clientX; pt.y = clientY;
+  return pt.matrixTransform(svgEl.getScreenCTM().inverse());
+}
+
 let dragging = false, lastX = 0, lastY = 0;
 stage.addEventListener("mousedown", (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; stage.style.cursor = "grabbing"; });
 window.addEventListener("mouseup", () => { dragging = false; stage.style.cursor = "grab"; });
@@ -201,33 +209,51 @@ window.addEventListener("mousemove", (e) => {
 });
 stage.addEventListener("wheel", (e) => {
   e.preventDefault();
-  const delta = e.deltaY > 0 ? 0.9 : 1.1;
-  scale = Math.min(4, Math.max(0.5, scale * delta));
+  // Anchor the zoom to the cursor: find the world point currently under
+  // it, apply a smooth continuous scale change, then re-anchor translate
+  // so that same world point stays under the cursor afterward.
+  const p = toSvgPoint(e.clientX, e.clientY);
+  const worldX = (p.x - tx) / scale;
+  const worldY = (p.y - ty) / scale;
+  const zoomFactor = Math.exp(-e.deltaY * 0.0015);
+  const newScale = Math.min(4, Math.max(0.5, scale * zoomFactor));
+  tx = p.x - worldX * newScale;
+  ty = p.y - worldY * newScale;
+  scale = newScale;
   render();
 }, { passive: false });
-let touchStartDist = null, touchStartScale = 1;
+let touchStartDist = null, touchStartScale = 1, touchAnchor = null;
 stage.addEventListener("touchstart", (e) => {
   if (e.touches.length === 2) {
     const [a, b] = e.touches;
     touchStartDist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
     touchStartScale = scale;
+    // Anchor pinch-zoom to the midpoint between the two fingers, same
+    // principle as the cursor anchor above.
+    const midClientX = (a.clientX + b.clientX) / 2;
+    const midClientY = (a.clientY + b.clientY) / 2;
+    const p = toSvgPoint(midClientX, midClientY);
+    touchAnchor = { x: p.x, y: p.y, worldX: (p.x - tx) / scale, worldY: (p.y - ty) / scale };
   } else if (e.touches.length === 1) {
     dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
   }
 });
 stage.addEventListener("touchmove", (e) => {
   e.preventDefault();
-  if (e.touches.length === 2 && touchStartDist) {
+  if (e.touches.length === 2 && touchStartDist && touchAnchor) {
     const [a, b] = e.touches;
     const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-    scale = Math.min(4, Math.max(0.5, touchStartScale * (dist / touchStartDist)));
+    const newScale = Math.min(4, Math.max(0.5, touchStartScale * (dist / touchStartDist)));
+    tx = touchAnchor.x - touchAnchor.worldX * newScale;
+    ty = touchAnchor.y - touchAnchor.worldY * newScale;
+    scale = newScale;
     render();
   } else if (e.touches.length === 1 && dragging) {
     tx += e.touches[0].clientX - lastX; ty += e.touches[0].clientY - lastY;
     lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; render();
   }
 }, { passive: false });
-window.addEventListener("touchend", () => { dragging = false; touchStartDist = null; });
+window.addEventListener("touchend", () => { dragging = false; touchStartDist = null; touchAnchor = null; });
 document.getElementById("reset-btn").onclick = () => { tx = 0; ty = 0; scale = 1; render(); };
 
 // --- load real data ---
