@@ -959,20 +959,27 @@ async function runDraft() {
     return;
   }
 
-  // Streaming path: shuffle the pool, check candidates one at a time
-  // against TMDB until 3 confirmed matches are found or a reasonable
-  // number of checks have been exhausted (bounds latency and API load).
+  // Streaming path: check candidates against TMDB in small concurrent
+  // batches (fast enough to cover the whole pool, not just an early
+  // slice of it, since a real match can easily land past position 15
+  // in a shuffled pool of 40+ movies).
   draftLoading = true;
   renderDraft();
 
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
   const found = [];
-  const MAX_CHECKS = 15;
-  for (let i = 0; i < shuffled.length && i < MAX_CHECKS && found.length < 3; i++) {
-    const matches = await matchedStreamingServices(shuffled[i]);
-    if (matches.length) {
-      found.push(shuffled[i]);
-      draftProviderMatches[shuffled[i].id] = matches;
+  const BATCH_SIZE = 5;
+  const MAX_CHECKS = Math.min(shuffled.length, 60);
+  for (let i = 0; i < MAX_CHECKS && found.length < 3; i += BATCH_SIZE) {
+    const batch = shuffled.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map((m) => matchedStreamingServices(m).then((matches) => ({ m, matches })))
+    );
+    for (const { m, matches } of results) {
+      if (matches.length && found.length < 3) {
+        found.push(m);
+        draftProviderMatches[m.id] = matches;
+      }
     }
   }
 
