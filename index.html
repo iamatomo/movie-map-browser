@@ -803,6 +803,7 @@ let lastDraftIds = null;
 let activePicker = null; // null | 'genre' | 'runtime' | 'stream' — which blank's chips are showing
 let draftLoading = false;
 let draftNoStreamingMatch = false; // true if a streaming search came back empty
+let draftDiscoverMode = false; // true when picks came from the whole platform, not the owned collection
 
 const RUNTIME_BUCKETS = ["short", "medium", "long", "epic"];
 const RUNTIME_BUCKET_LABELS = { short: "Short", medium: "Medium", long: "Long", epic: "Epic" };
@@ -863,6 +864,7 @@ function openDraft() {
   activePicker = null;
   draftLoading = false;
   draftNoStreamingMatch = false;
+  draftDiscoverMode = false;
   renderDraft();
 }
 
@@ -903,15 +905,14 @@ function sameIds(picks, ids) {
   return a.length === ids.length && a.every((id, i) => id === ids[i]);
 }
 
-// Checks one movie's current US streaming providers against whatever
-// services are selected, returning the matched service label(s) (using
-// the friendly chip names, not TMDB's raw provider strings) rather than
-// just true/false, so the tile can show exactly where it was found.
-// Network call per candidate, so this only runs once a real draw is
-// triggered, never on every chip tap.
-async function matchedStreamingServices(m) {
+// Checks one movie's current US streaming providers by its TMDB ID
+// (more reliable than searching by title again, since discover already
+// resolved the exact movie), returning the matched service label(s)
+// using the friendly chip names rather than TMDB's raw provider
+// strings, so a tile can show exactly where it was found.
+async function matchedStreamingServicesById(tmdbId) {
   try {
-    const resp = await fetch(`/api/providers?title=${encodeURIComponent(getTitle(m))}`);
+    const resp = await fetch(`/api/providers?tmdbId=${tmdbId}`);
     const data = await resp.json();
     const names = (data.providers || []).map((n) => n.toLowerCase());
     return Array.from(draftStreams).filter((sel) =>
@@ -922,32 +923,32 @@ async function matchedStreamingServices(m) {
   }
 }
 
-// The actual draw. Genre (required) and runtime (optional) filter the
-// pool locally and instantly, same as before. Streaming selection is
-// the part that's genuinely async: DVD (or nothing selected) draws
-// instantly from the local pool, same as always, since that's just
-// "from my collection." An actual streaming service means checking
-// real candidates against TMDB one at a time until 3 matches turn up
-// or a reasonable number of candidates have been exhausted.
+// The actual draw. Genre is always required. DVD (or nothing selected
+// in the third blank) draws instantly and locally from the owned
+// collection, exactly as before. Picking a real streaming service
+// switches to a genuinely different search: the whole platform's
+// catalog via TMDB's discover endpoint, not just the overlap with what
+// you own, then a quick per-pick lookup gets the precise service label
+// for each result.
 async function runDraft() {
   const selectedGenres = Array.from(draftGenres);
   const selectedRuntimes = Array.from(draftRuntimes);
+  const selectedStreams = Array.from(draftStreams);
   draftChosenIndex = null;
   draftNoStreamingMatch = false;
   draftProviderMatches = {};
 
-  const pool = selectedGenres.length === 0
-    ? []
-    : movies.filter((m) =>
-        selectedGenres.includes(m[curCat]) &&
-        (selectedRuntimes.length === 0 || selectedRuntimes.includes(runtimeBucket(m)))
-      );
+  if (selectedGenres.length === 0) { draftPicks = []; renderDraft(); return; }
 
-  if (pool.length === 0) { draftPicks = []; renderDraft(); return; }
-
-  const wantsStreaming = draftStreams.size > 0 && !draftStreams.has("DVD");
+  const wantsStreaming = selectedStreams.length > 0 && !selectedStreams.includes("DVD");
 
   if (!wantsStreaming) {
+    draftDiscoverMode = false;
+    const pool = movies.filter((m) =>
+      selectedGenres.includes(m[curCat]) &&
+      (selectedRuntimes.length === 0 || selectedRuntimes.includes(runtimeBucket(m)))
+    );
+    if (pool.length === 0) { draftPicks = []; renderDraft(); return; }
     let picks, attempts = 0;
     do {
       picks = [...pool].sort(() => Math.random() - 0.5).slice(0, 3);
@@ -959,33 +960,31 @@ async function runDraft() {
     return;
   }
 
-  // Streaming path: check candidates against TMDB in small concurrent
-  // batches (fast enough to cover the whole pool, not just an early
-  // slice of it, since a real match can easily land past position 15
-  // in a shuffled pool of 40+ movies).
+  draftDiscoverMode = true;
   draftLoading = true;
   renderDraft();
 
-  const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  const found = [];
-  const BATCH_SIZE = 5;
-  const MAX_CHECKS = Math.min(shuffled.length, 60);
-  for (let i = 0; i < MAX_CHECKS && found.length < 3; i += BATCH_SIZE) {
-    const batch = shuffled.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(
-      batch.map((m) => matchedStreamingServices(m).then((matches) => ({ m, matches })))
-    );
-    for (const { m, matches } of results) {
-      if (matches.length && found.length < 3) {
-        found.push(m);
-        draftProviderMatches[m.id] = matches;
-      }
-    }
-  }
+  try {
+    const url = new URL("/api/discover", window.location.origin);
+    url.searchParams.set("genre", selectedGenres.join(","));
+    if (selectedRuntimes.length) url.searchParams.set("runtime", selectedRuntimes.join(","));
+    url.searchParams.set("stream", selectedStreams.join(","));
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const results = data.results || [];
+    const picks = [...results].sort(() => Math.random() - 0.5).slice(0, 3);
 
-  draftPicks = found;
-  draftNoStreamingMatch = found.length === 0;
-  lastDraftIds = found.map((m) => m.id).sort();
+    // Precise per-pick service label, rather than just assuming every
+    // selected service applies to every result.
+    const matchArrays = await Promise.all(picks.map((p) => matchedStreamingServicesById(p.tmdbId)));
+    picks.forEach((p, i) => { draftProviderMatches[p.tmdbId] = matchArrays[i]; });
+
+    draftPicks = picks;
+    draftNoStreamingMatch = picks.length === 0;
+  } catch {
+    draftPicks = [];
+    draftNoStreamingMatch = true;
+  }
   draftLoading = false;
   renderDraft();
 }
@@ -998,8 +997,13 @@ function selectDraftTile(i) {
 function watchThisMovie() {
   if (draftChosenIndex === null) return;
   const chosen = draftPicks[draftChosenIndex];
-  // TODO: write today's date back to the "Last Watched" column in
-  // Airtable for `chosen.id` once write access is wired up.
+  if (!draftDiscoverMode) {
+    // TODO: write today's date back to the "Last Watched" column in
+    // Airtable for `chosen.id` once write access is wired up.
+  }
+  // Discover-mode picks aren't in the Airtable collection at all (they
+  // may not even be owned), so there's nothing to write back for them
+  // unless a future "add to my collection" flow gets built.
   closeDraft();
 }
 
@@ -1040,6 +1044,28 @@ function renderDraft() {
   }
 
   const tilesHtml = draftPicks.map((m, i) => {
+    if (draftDiscoverMode) {
+      const short = m.overview && m.overview.length > 110
+        ? m.overview.slice(0, 110).trim() + "…"
+        : m.overview;
+      const rows = [];
+      if (m.genres && m.genres.length) rows.push(["Genre", m.genres.join(", ")]);
+      if (m.releaseYear) rows.push(["Year", m.releaseYear]);
+      if (draftProviderMatches[m.tmdbId] && draftProviderMatches[m.tmdbId].length) {
+        rows.push(["Streaming on", joinWithOr(draftProviderMatches[m.tmdbId])]);
+      }
+      return `
+        <div class="draft-tile ${draftChosenIndex === i ? "selected" : ""}" onclick="selectDraftTile(${i})">
+          ${m.posterUrl ? `<img src="${m.posterUrl}" alt="" style="width:100%;border-radius:8px;margin-bottom:10px;display:block;" />` : ""}
+          <h3>${m.title}</h3>
+          ${rows.map(([label, value]) => `
+            <div class="field">
+              <div class="field-label">${label}</div>
+              <div class="field-value">${value}</div>
+            </div>`).join("")}
+          ${short ? `<div class="field"><div class="field-value">${short}</div></div>` : ""}
+        </div>`;
+    }
     const description = getField(m, DESCRIPTION_FIELD_CANDIDATES);
     const short = description && description.length > 110
       ? description.slice(0, 110).trim() + "…"
@@ -1049,7 +1075,6 @@ function renderDraft() {
     if (runtime) rows.push(["Runtime", `${String(runtime).trim()} min`]);
     const audience = categoryFields.find((f) => f.toLowerCase() === "audience");
     if (audience && m[audience]) rows.push([audience, m[audience]]);
-    if (draftProviderMatches[m.id]) rows.push(["Streaming on", joinWithOr(draftProviderMatches[m.id])]);
     return `
       <div class="draft-tile ${draftChosenIndex === i ? "selected" : ""}" onclick="selectDraftTile(${i})">
         <h3>${getTitle(m)}</h3>
