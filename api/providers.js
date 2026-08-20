@@ -30,7 +30,14 @@ module.exports = async function handler(req, res) {
     const searchResp = await fetch(searchUrl, { headers });
     if (!searchResp.ok) throw new Error(`TMDB search error ${searchResp.status}`);
     const searchData = await searchResp.json();
-    const match = searchData.results && searchData.results[0];
+    const results = searchData.results || [];
+    const query = title.trim().toLowerCase();
+    // TMDB's default sort is "relevance," not "exact match," so for a
+    // common or ambiguous title the first result can be the wrong movie
+    // entirely. Prefer an exact (case-insensitive) title match if one
+    // exists among the results, and only fall back to "first result"
+    // when nothing matches exactly.
+    const match = results.find((r) => (r.title || "").trim().toLowerCase() === query) || results[0];
 
     if (!match) {
       res.status(200).json({ providers: [], matched: false });
