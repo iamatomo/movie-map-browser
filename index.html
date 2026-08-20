@@ -797,6 +797,7 @@ let draftGenres = new Set();
 let draftRuntimes = new Set();
 let draftStreams = new Set(); // 'DVD' or streaming service names
 let draftPicks = [];
+let draftProviderMatches = {}; // movie id -> array of matched service labels
 let draftChosenIndex = null;
 let lastDraftIds = null;
 let activePicker = null; // null | 'genre' | 'runtime' | 'stream' — which blank's chips are showing
@@ -856,6 +857,7 @@ function openDraft() {
   draftRuntimes = new Set();
   draftStreams = new Set();
   draftPicks = [];
+  draftProviderMatches = {};
   draftChosenIndex = null;
   lastDraftIds = null;
   activePicker = null;
@@ -902,18 +904,21 @@ function sameIds(picks, ids) {
 }
 
 // Checks one movie's current US streaming providers against whatever
-// services are selected. Network call per candidate, so this only runs
-// once a real draw is triggered, never on every chip tap.
-async function movieMatchesStreaming(m) {
+// services are selected, returning the matched service label(s) (using
+// the friendly chip names, not TMDB's raw provider strings) rather than
+// just true/false, so the tile can show exactly where it was found.
+// Network call per candidate, so this only runs once a real draw is
+// triggered, never on every chip tap.
+async function matchedStreamingServices(m) {
   try {
     const resp = await fetch(`/api/providers?title=${encodeURIComponent(getTitle(m))}`);
     const data = await resp.json();
     const names = (data.providers || []).map((n) => n.toLowerCase());
-    return Array.from(draftStreams).some((sel) =>
+    return Array.from(draftStreams).filter((sel) =>
       (STREAM_ALIASES[sel] || []).some((alias) => names.some((n) => n.includes(alias)))
     );
   } catch {
-    return false;
+    return [];
   }
 }
 
@@ -929,6 +934,7 @@ async function runDraft() {
   const selectedRuntimes = Array.from(draftRuntimes);
   draftChosenIndex = null;
   draftNoStreamingMatch = false;
+  draftProviderMatches = {};
 
   const pool = selectedGenres.length === 0
     ? []
@@ -963,8 +969,11 @@ async function runDraft() {
   const found = [];
   const MAX_CHECKS = 15;
   for (let i = 0; i < shuffled.length && i < MAX_CHECKS && found.length < 3; i++) {
-    const isMatch = await movieMatchesStreaming(shuffled[i]);
-    if (isMatch) found.push(shuffled[i]);
+    const matches = await matchedStreamingServices(shuffled[i]);
+    if (matches.length) {
+      found.push(shuffled[i]);
+      draftProviderMatches[shuffled[i].id] = matches;
+    }
   }
 
   draftPicks = found;
@@ -1033,6 +1042,7 @@ function renderDraft() {
     if (runtime) rows.push(["Runtime", `${String(runtime).trim()} min`]);
     const audience = categoryFields.find((f) => f.toLowerCase() === "audience");
     if (audience && m[audience]) rows.push([audience, m[audience]]);
+    if (draftProviderMatches[m.id]) rows.push(["Streaming on", joinWithOr(draftProviderMatches[m.id])]);
     return `
       <div class="draft-tile ${draftChosenIndex === i ? "selected" : ""}" onclick="selectDraftTile(${i})">
         <h3>${getTitle(m)}</h3>
