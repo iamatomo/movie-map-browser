@@ -11,41 +11,46 @@
 module.exports = async function handler(req, res) {
   const token = process.env.TMDB_READ_TOKEN;
   const title = req.query.title;
+  const tmdbIdParam = req.query.tmdbId;
 
   if (!token) {
     res.status(500).json({ error: "Missing TMDB_READ_TOKEN in Vercel's environment variables." });
     return;
   }
-  if (!title) {
-    res.status(400).json({ error: "Missing title query parameter." });
+  if (!title && !tmdbIdParam) {
+    res.status(400).json({ error: "Missing title or tmdbId query parameter." });
     return;
   }
 
   const headers = { Authorization: `Bearer ${token}`, accept: "application/json" };
 
   try {
-    const searchUrl = new URL("https://api.themoviedb.org/3/search/movie");
-    searchUrl.searchParams.set("query", title);
-    searchUrl.searchParams.set("include_adult", "false");
-    const searchResp = await fetch(searchUrl, { headers });
-    if (!searchResp.ok) throw new Error(`TMDB search error ${searchResp.status}`);
-    const searchData = await searchResp.json();
-    const results = searchData.results || [];
-    const query = title.trim().toLowerCase();
-    // TMDB's default sort is "relevance," not "exact match," so for a
-    // common or ambiguous title the first result can be the wrong movie
-    // entirely. Prefer an exact (case-insensitive) title match if one
-    // exists among the results, and only fall back to "first result"
-    // when nothing matches exactly.
-    const match = results.find((r) => (r.title || "").trim().toLowerCase() === query) || results[0];
+    let movieId = tmdbIdParam;
 
-    if (!match) {
-      res.status(200).json({ providers: [], matched: false });
-      return;
+    if (!movieId) {
+      const searchUrl = new URL("https://api.themoviedb.org/3/search/movie");
+      searchUrl.searchParams.set("query", title);
+      searchUrl.searchParams.set("include_adult", "false");
+      const searchResp = await fetch(searchUrl, { headers });
+      if (!searchResp.ok) throw new Error(`TMDB search error ${searchResp.status}`);
+      const searchData = await searchResp.json();
+      const results = searchData.results || [];
+      const query = title.trim().toLowerCase();
+      // TMDB's default sort is "relevance," not "exact match," so for a
+      // common or ambiguous title the first result can be the wrong movie
+      // entirely. Prefer an exact (case-insensitive) title match if one
+      // exists among the results, and only fall back to "first result"
+      // when nothing matches exactly.
+      const match = results.find((r) => (r.title || "").trim().toLowerCase() === query) || results[0];
+      if (!match) {
+        res.status(200).json({ providers: [], matched: false });
+        return;
+      }
+      movieId = match.id;
     }
 
     const provResp = await fetch(
-      `https://api.themoviedb.org/3/movie/${match.id}/watch/providers`,
+      `https://api.themoviedb.org/3/movie/${movieId}/watch/providers`,
       { headers }
     );
     if (!provResp.ok) throw new Error(`TMDB providers error ${provResp.status}`);
@@ -61,7 +66,7 @@ module.exports = async function handler(req, res) {
     // Cached for 6 hours: JustWatch's own feed to TMDB only updates
     // about once a day anyway, so there's no point checking more often.
     res.setHeader("Cache-Control", "s-maxage=21600, stale-while-revalidate");
-    res.status(200).json({ providers: names, matched: true, tmdbId: match.id });
+    res.status(200).json({ providers: names, matched: true, tmdbId: movieId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
