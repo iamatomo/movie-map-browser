@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>My Movie Universe</title>
+<title>Movie Map Browser</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -261,6 +261,35 @@
   #watch-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+  #redraft-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .draft-loader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 48px 0;
+    margin-bottom: 24px;
+    color: #8a8f99;
+    font-size: 13px;
+  }
+  .draft-loader-dots { display: flex; gap: 8px; }
+  .draft-loader-dots span {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #e07856;
+    animation: draft-pulse 1s infinite ease-in-out;
+  }
+  .draft-loader-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .draft-loader-dots span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes draft-pulse {
+    0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+    40% { opacity: 1; transform: scale(1); }
   }
 </style>
 </head>
@@ -766,10 +795,13 @@ document.getElementById("zoom-out-btn").onclick = () => stepZoom(1 / 1.3);
 // --- movie draft ---
 let draftGenres = new Set();
 let draftRuntimes = new Set();
+let draftStreams = new Set(); // 'DVD' or streaming service names
 let draftPicks = [];
 let draftChosenIndex = null;
 let lastDraftIds = null;
-let activePicker = null; // null | 'genre' | 'runtime' — which blank's chips are showing
+let activePicker = null; // null | 'genre' | 'runtime' | 'stream' — which blank's chips are showing
+let draftLoading = false;
+let draftNoStreamingMatch = false; // true if a streaming search came back empty
 
 const RUNTIME_BUCKETS = ["short", "medium", "long", "epic"];
 const RUNTIME_BUCKET_LABELS = { short: "Short", medium: "Medium", long: "Long", epic: "Epic" };
@@ -778,6 +810,21 @@ const RUNTIME_BUCKET_HINTS = {
   medium: "101–140 min",
   long: "141–160 min",
   epic: "161 min or more",
+};
+
+// TMDB's provider_name strings don't always exactly match a friendly
+// chip label ("Amazon Prime Video" vs "Prime Video"), so each chip
+// checks against a small set of aliases instead of an exact match.
+const STREAM_OPTIONS = ["DVD", "Netflix", "Hulu", "Disney+", "Max", "Prime Video", "Apple TV+", "Paramount+", "Peacock"];
+const STREAM_ALIASES = {
+  "Netflix": ["netflix"],
+  "Hulu": ["hulu"],
+  "Disney+": ["disney plus", "disney+"],
+  "Max": ["max", "hbo max"],
+  "Prime Video": ["prime video", "amazon prime video"],
+  "Apple TV+": ["apple tv+", "apple tv plus"],
+  "Paramount+": ["paramount+", "paramount plus"],
+  "Peacock": ["peacock"],
 };
 
 function runtimeBucket(m) {
@@ -807,10 +854,13 @@ function joinWithOr(list) {
 function openDraft() {
   draftGenres = new Set();
   draftRuntimes = new Set();
+  draftStreams = new Set();
   draftPicks = [];
   draftChosenIndex = null;
   lastDraftIds = null;
   activePicker = null;
+  draftLoading = false;
+  draftNoStreamingMatch = false;
   renderDraft();
 }
 
@@ -823,48 +873,27 @@ function togglePicker(name) {
   renderDraft();
 }
 
+// Selecting chips only updates state now, it doesn't trigger a draw.
+// The actual draw waits for the Draft/Re-draft button, since a
+// streaming check means real network calls per candidate.
 function toggleDraftGenre(g) {
   if (draftGenres.has(g)) draftGenres.delete(g); else draftGenres.add(g);
-  draftChosenIndex = null;
-  redraw();
   renderDraft();
 }
 
 function toggleDraftRuntime(bucket) {
   if (draftRuntimes.has(bucket)) draftRuntimes.delete(bucket); else draftRuntimes.add(bucket);
-  draftChosenIndex = null;
-  redraw();
   renderDraft();
 }
 
-// Picks 3 movies at random from whatever matches the selected genres
-// (required) and runtime buckets (optional refinement), trying, not
-// guaranteeing, if the pool is small, to avoid handing back the exact
-// same three as last time.
-function redraw() {
-  const selectedGenres = Array.from(draftGenres);
-  const selectedRuntimes = Array.from(draftRuntimes);
-  const pool = selectedGenres.length === 0
-    ? []
-    : movies.filter((m) =>
-        selectedGenres.includes(m[curCat]) &&
-        (selectedRuntimes.length === 0 || selectedRuntimes.includes(runtimeBucket(m)))
-      );
-
-  if (pool.length === 0) { draftPicks = []; return; }
-
-  let picks, attempts = 0;
-  do {
-    picks = [...pool].sort(() => Math.random() - 0.5).slice(0, 3);
-    attempts++;
-  } while (
-    attempts < 6 &&
-    pool.length > 3 &&
-    lastDraftIds &&
-    sameIds(picks, lastDraftIds)
-  );
-  lastDraftIds = picks.map((m) => m.id).sort();
-  draftPicks = picks;
+function toggleDraftStream(value) {
+  if (value === "DVD") {
+    draftStreams = draftStreams.has("DVD") ? new Set() : new Set(["DVD"]);
+  } else {
+    draftStreams.delete("DVD");
+    if (draftStreams.has(value)) draftStreams.delete(value); else draftStreams.add(value);
+  }
+  renderDraft();
 }
 
 function sameIds(picks, ids) {
@@ -872,9 +901,76 @@ function sameIds(picks, ids) {
   return a.length === ids.length && a.every((id, i) => id === ids[i]);
 }
 
-function reDraft() {
+// Checks one movie's current US streaming providers against whatever
+// services are selected. Network call per candidate, so this only runs
+// once a real draw is triggered, never on every chip tap.
+async function movieMatchesStreaming(m) {
+  try {
+    const resp = await fetch(`/api/providers?title=${encodeURIComponent(getTitle(m))}`);
+    const data = await resp.json();
+    const names = (data.providers || []).map((n) => n.toLowerCase());
+    return Array.from(draftStreams).some((sel) =>
+      (STREAM_ALIASES[sel] || []).some((alias) => names.some((n) => n.includes(alias)))
+    );
+  } catch {
+    return false;
+  }
+}
+
+// The actual draw. Genre (required) and runtime (optional) filter the
+// pool locally and instantly, same as before. Streaming selection is
+// the part that's genuinely async: DVD (or nothing selected) draws
+// instantly from the local pool, same as always, since that's just
+// "from my collection." An actual streaming service means checking
+// real candidates against TMDB one at a time until 3 matches turn up
+// or a reasonable number of candidates have been exhausted.
+async function runDraft() {
+  const selectedGenres = Array.from(draftGenres);
+  const selectedRuntimes = Array.from(draftRuntimes);
   draftChosenIndex = null;
-  redraw();
+  draftNoStreamingMatch = false;
+
+  const pool = selectedGenres.length === 0
+    ? []
+    : movies.filter((m) =>
+        selectedGenres.includes(m[curCat]) &&
+        (selectedRuntimes.length === 0 || selectedRuntimes.includes(runtimeBucket(m)))
+      );
+
+  if (pool.length === 0) { draftPicks = []; renderDraft(); return; }
+
+  const wantsStreaming = draftStreams.size > 0 && !draftStreams.has("DVD");
+
+  if (!wantsStreaming) {
+    let picks, attempts = 0;
+    do {
+      picks = [...pool].sort(() => Math.random() - 0.5).slice(0, 3);
+      attempts++;
+    } while (attempts < 6 && pool.length > 3 && lastDraftIds && sameIds(picks, lastDraftIds));
+    lastDraftIds = picks.map((m) => m.id).sort();
+    draftPicks = picks;
+    renderDraft();
+    return;
+  }
+
+  // Streaming path: shuffle the pool, check candidates one at a time
+  // against TMDB until 3 confirmed matches are found or a reasonable
+  // number of checks have been exhausted (bounds latency and API load).
+  draftLoading = true;
+  renderDraft();
+
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
+  const found = [];
+  const MAX_CHECKS = 15;
+  for (let i = 0; i < shuffled.length && i < MAX_CHECKS && found.length < 3; i++) {
+    const isMatch = await movieMatchesStreaming(shuffled[i]);
+    if (isMatch) found.push(shuffled[i]);
+  }
+
+  draftPicks = found;
+  draftNoStreamingMatch = found.length === 0;
+  lastDraftIds = found.map((m) => m.id).sort();
+  draftLoading = false;
   renderDraft();
 }
 
@@ -895,6 +991,7 @@ function renderDraft() {
   const genres = availableGenres();
   const selectedGenres = Array.from(draftGenres);
   const selectedRuntimes = Array.from(draftRuntimes);
+  const selectedStreams = Array.from(draftStreams);
 
   const genreBlank = selectedGenres.length
     ? `<span class="filled blank ${activePicker === "genre" ? "active" : ""}" onclick="togglePicker('genre')">${joinWithOr(selectedGenres)}</span>`
@@ -904,25 +1001,26 @@ function renderDraft() {
     ? `<span class="filled blank ${activePicker === "runtime" ? "active" : ""}" onclick="togglePicker('runtime')">${joinWithOr(selectedRuntimes.map((b) => RUNTIME_BUCKET_LABELS[b].toLowerCase()))}</span>`
     : `<span class="empty blank ${activePicker === "runtime" ? "active" : ""}" onclick="togglePicker('runtime')">any length</span>`;
 
+  const streamBlank = selectedStreams.length
+    ? `<span class="filled blank ${activePicker === "stream" ? "active" : ""}" onclick="togglePicker('stream')">${selectedStreams.includes("DVD") ? "DVD" : joinWithOr(selectedStreams)}</span>`
+    : `<span class="empty blank ${activePicker === "stream" ? "active" : ""}" onclick="togglePicker('stream')">streaming or on DVD</span>`;
+
   let pickerHtml = "";
   if (activePicker === "genre") {
     const chips = genres.map((g) => `
       <button class="genre-chip ${draftGenres.has(g) ? "selected" : ""}" onclick="toggleDraftGenre('${g.replace(/'/g, "\\'")}')">${g}</button>
     `).join("");
-    pickerHtml = `
-      <div class="picker-panel">
-        <div class="picker-label">Genre</div>
-        <div class="genre-chips">${chips}</div>
-      </div>`;
+    pickerHtml = `<div class="picker-panel"><div class="picker-label">Genre</div><div class="genre-chips">${chips}</div></div>`;
   } else if (activePicker === "runtime") {
     const chips = RUNTIME_BUCKETS.map((b) => `
       <button class="genre-chip ${draftRuntimes.has(b) ? "selected" : ""}" onclick="toggleDraftRuntime('${b}')">${RUNTIME_BUCKET_LABELS[b]} <span style="opacity:0.6;">(${RUNTIME_BUCKET_HINTS[b]})</span></button>
     `).join("");
-    pickerHtml = `
-      <div class="picker-panel">
-        <div class="picker-label">Runtime</div>
-        <div class="genre-chips">${chips}</div>
-      </div>`;
+    pickerHtml = `<div class="picker-panel"><div class="picker-label">Runtime</div><div class="genre-chips">${chips}</div></div>`;
+  } else if (activePicker === "stream") {
+    const chips = STREAM_OPTIONS.map((s) => `
+      <button class="genre-chip ${draftStreams.has(s) ? "selected" : ""}" onclick="toggleDraftStream('${s}')">${s === "DVD" ? "DVD (my collection)" : s}</button>
+    `).join("");
+    pickerHtml = `<div class="picker-panel"><div class="picker-label">Where to watch</div><div class="genre-chips">${chips}</div><p style="font-size:11px;color:#565b66;margin:10px 0 0;">Streaming data via JustWatch, through TMDB.</p></div>`;
   }
 
   const tilesHtml = draftPicks.map((m, i) => {
@@ -947,19 +1045,27 @@ function renderDraft() {
       </div>`;
   }).join("");
 
-  const emptyPoolNote = selectedGenres.length && draftPicks.length === 0
-    ? `<p class="draft-hint">No movies match that combination yet.</p>` : "";
+  let hintHtml = "";
+  if (draftLoading) {
+    hintHtml = `<div class="draft-loader"><div class="draft-loader-dots"><span></span><span></span><span></span></div>Checking what's actually streaming there right now…</div>`;
+  } else if (draftNoStreamingMatch) {
+    hintHtml = `<p class="draft-hint">None of these are currently streaming there — try DVD or a different service.</p>`;
+  } else if (selectedGenres.length && draftPicks.length === 0) {
+    hintHtml = `<p class="draft-hint">No movies match that combination yet.</p>`;
+  }
+
+  const drawBtnLabel = draftPicks.length || draftLoading ? "Re-draft" : "Draft";
 
   document.getElementById("draft-root").innerHTML = `
     <div id="draft-overlay" onclick="if(event.target.id==='draft-overlay') closeDraft()">
       <div id="draft-card">
         <button id="draft-close" onclick="closeDraft()">&times;</button>
-        <p id="draft-sentence">I want to watch a ${genreBlank} movie that is ${runtimeBlank}.</p>
+        <p id="draft-sentence">I want to watch a ${genreBlank} movie that is ${runtimeBlank} on ${streamBlank}.</p>
         ${pickerHtml}
-        ${emptyPoolNote}
-        ${draftPicks.length ? `<div class="draft-tiles">${tilesHtml}</div>` : ""}
+        ${hintHtml}
+        ${!draftLoading && draftPicks.length ? `<div class="draft-tiles">${tilesHtml}</div>` : ""}
         <div class="draft-actions">
-          <button id="redraft-btn" onclick="reDraft()" ${draftPicks.length ? "" : "disabled"}>Re-draft</button>
+          <button id="redraft-btn" onclick="runDraft()" ${selectedGenres.length && !draftLoading ? "" : "disabled"}>${drawBtnLabel}</button>
           <button id="watch-btn" onclick="watchThisMovie()" ${draftChosenIndex === null ? "disabled" : ""}>Let's watch this!</button>
         </div>
       </div>
